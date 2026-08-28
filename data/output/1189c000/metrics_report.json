@@ -1,0 +1,23 @@
+{
+  "session_id": "1189c000",
+  "model": {
+    "name": "EDSR-Lite (Demo Mode \u2014 No Pretrained Weights)",
+    "scale_factor": 3,
+    "device": "cpu",
+    "parameters": 242211,
+    "is_loaded": true,
+    "architecture": "EDSR-Lite (8 Residual Blocks, 32 Features)"
+  },
+  "processing_time_seconds": 6.93,
+  "metrics": {
+    "psnr": 8.95,
+    "ssim": 0.0727,
+    "sam": 37.5526,
+    "spectral_consistency": 0.0,
+    "sharpness_gain": 63.15,
+    "reference_available": true,
+    "benchmark_mode": true,
+    "notes": []
+  },
+  "disclaimer": "AI super-resolved output. Spatial detail represents AI reconstruction. Scientific validation against reference imagery required for geospatial claims."
+}

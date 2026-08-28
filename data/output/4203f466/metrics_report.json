@@ -1,0 +1,25 @@
+{
+  "session_id": "4203f466",
+  "model": {
+    "name": "EDSR-Lite (Demo Mode \u2014 No Pretrained Weights)",
+    "scale_factor": 3,
+    "device": "cpu",
+    "parameters": 242211,
+    "is_loaded": true,
+    "architecture": "EDSR-Lite (8 Residual Blocks, 32 Features)"
+  },
+  "processing_time_seconds": 0.95,
+  "metrics": {
+    "psnr": 9.35,
+    "ssim": 0.074,
+    "sam": 34.1282,
+    "spectral_consistency": 0.0,
+    "sharpness_gain": null,
+    "reference_available": true,
+    "benchmark_mode": true,
+    "notes": [
+      "Sharpness gain unavailable: module 'cv2' has no attribute 'INTER_BICUBIC'"
+    ]
+  },
+  "disclaimer": "AI super-resolved output. Spatial detail represents AI reconstruction. Scientific validation against reference imagery required for geospatial claims."
+}
