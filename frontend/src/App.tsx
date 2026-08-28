@@ -5,7 +5,7 @@ import {
   AlertCircle, Image, Cpu, RefreshCw, Info, MapPin, BarChart2
 } from 'lucide-react';
 import Globe from '@/components/ui/globe';
-const API = 'http://localhost:8000';
+const API = 'https://5f4b2688a6eeba.lhr.life';
 
 // ============================================================================
 // API HELPERS
