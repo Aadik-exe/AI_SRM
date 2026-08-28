@@ -5,7 +5,7 @@ import {
   AlertCircle, Image, Cpu, RefreshCw, Info, MapPin, BarChart2
 } from 'lucide-react';
 import Globe from '@/components/ui/globe';
-const API = 'https://conclude-isp-edge-amenities.trycloudflare.com';
+const API = 'https://ai-srm.onrender.com';
 
 // ============================================================================
 // API HELPERS
