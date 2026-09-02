@@ -1,0 +1,3 @@
+# Place trained model weights here.
+# Filename: edsr_satellite.pth
+# The backend auto-detects this file on startup.

@@ -32,11 +32,12 @@ logging.basicConfig(
 logger = logging.getLogger("srm")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-BASE_DIR  = Path(__file__).parent
-DATA_DIR  = BASE_DIR / "data"
-INPUT_DIR = DATA_DIR / "input"
-DEMO_DIR  = DATA_DIR / "demo"
-for d in [INPUT_DIR, DEMO_DIR]:
+BASE_DIR   = Path(__file__).parent
+DATA_DIR   = BASE_DIR / "data"
+INPUT_DIR  = DATA_DIR / "input"
+DEMO_DIR   = DATA_DIR / "demo"
+MODELS_DIR = BASE_DIR / "models"
+for d in [INPUT_DIR, DEMO_DIR, MODELS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -256,6 +257,26 @@ class SuperResolutionEngine:
 
     # ── Model loading ─────────────────────────────────────────────────────────
     def _load_model(self):
+        # Priority 1: Our satellite-trained EDSR weights
+        sat_path = MODELS_DIR / "edsr_satellite.pth" if MODELS_DIR else None
+        if sat_path and sat_path.exists():
+            logger.info(f"Loading satellite-trained EDSR from {sat_path}…")
+            self._build_edsr_lite()   # build architecture first
+            try:
+                import torch
+                self._edsr_net.load_state_dict(
+                    torch.load(str(sat_path), map_location=self._edsr_dev)
+                )
+                self._edsr_net.eval()
+                self.model_name = "EDSR-Satellite (SIH 2024 · Sentinel-2 ×4)"
+                self.model_type = "EDSR-SAT"
+                self._si_model  = None
+                logger.info("✓ Satellite-trained EDSR weights loaded")
+                return
+            except Exception as exc:
+                logger.warning(f"Failed to load satellite weights ({exc}) — falling back")
+
+        # Priority 2: A2N from HuggingFace (pretrained on DIV2K)
         try:
             from super_image import A2nModel
             logger.info("Downloading / loading A2N from HuggingFace…")
