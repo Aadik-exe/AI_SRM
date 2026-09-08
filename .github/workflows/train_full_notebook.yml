@@ -1,0 +1,52 @@
+name: Run Full Notebook Training
+
+on:
+  workflow_dispatch:  # Allows manual triggering
+
+permissions:
+  contents: write
+
+jobs:
+  train-notebook:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # 6 hours timeout to accommodate CPU training
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Prepare /content directory
+        run: |
+          sudo mkdir -p /content/hr
+          sudo mkdir -p /content/ckpt
+          sudo chown -R $USER:$USER /content
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch torchvision opencv-python-headless numpy rasterio tqdm jupyter nbconvert matplotlib
+
+      - name: Execute Jupyter Notebook
+        run: |
+          jupyter nbconvert --to notebook --execute SRM_Train_Sentinel2.ipynb --output SRM_Train_Sentinel2_Executed.ipynb
+
+      - name: Commit and Push New Weights
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          
+          # Move the trained weights to the models directory
+          mkdir -p models
+          cp /content/edsr_satellite.pth models/ || echo "File not found at /content/edsr_satellite.pth. Attempting to copy from /content/ckpt/edsr_satellite_best.pth..."
+          cp /content/ckpt/edsr_satellite_best.pth models/edsr_satellite.pth || echo "No model file found."
+
+          git add models/edsr_satellite.pth
+          git diff --quiet && git diff --staged --quiet || git commit -m "Auto-update full satellite-trained EDSR weights from Notebook"
+          git pull --rebase origin main
+          git push
