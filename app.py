@@ -297,25 +297,17 @@ class SuperResolutionEngine:
         import torch.nn as nn
 
         class ResBlock(nn.Module):
-            def __init__(self, f: int = 64):
+            def __init__(self, f=32):
                 super().__init__()
-                self.net = nn.Sequential(
-                    nn.Conv2d(f, f, 3, padding=1),
-                    nn.ReLU(inplace=True),
-                    nn.Conv2d(f, f, 3, padding=1),
-                )
-            def forward(self, x): return x + self.net(x)
+                self.b = nn.Sequential(nn.Conv2d(f, f, 3, padding=1), nn.ReLU(True), nn.Conv2d(f, f, 3, padding=1))
+            def forward(self, x): return x + self.b(x) * 0.1
 
         class EDSR(nn.Module):
-            def __init__(self, nc=3, nf=64, nb=16, scale=4):
+            def __init__(self, f=32, nb=8, scale=4):
                 super().__init__()
-                self.head = nn.Conv2d(nc, nf, 3, padding=1)
-                self.body = nn.Sequential(*[ResBlock(nf) for _ in range(nb)])
-                self.tail = nn.Sequential(
-                    nn.Conv2d(nf, nf * (scale ** 2), 3, padding=1),
-                    nn.PixelShuffle(scale),
-                    nn.Conv2d(nf, nc, 3, padding=1),
-                )
+                self.head = nn.Conv2d(3, f, 3, padding=1)
+                self.body = nn.Sequential(*[ResBlock(f) for _ in range(nb)], nn.Conv2d(f, f, 3, padding=1))
+                self.tail = nn.Sequential(nn.Conv2d(f, f * (scale ** 2), 3, padding=1), nn.PixelShuffle(scale), nn.Conv2d(f, 3, 3, padding=1))
             def forward(self, x):
                 h = self.head(x)
                 return self.tail(self.body(h) + h)
