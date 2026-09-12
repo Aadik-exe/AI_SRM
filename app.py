@@ -685,6 +685,11 @@ async def upload(file: UploadFile = File(...)):
         if up_path.exists():
             up_path.unlink(missing_ok=True)
 
+frontend_dir = BASE_DIR / "frontend" / "dist"
+if frontend_dir.exists():
+    app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
+else:
+    logger.warning("Frontend dist folder not found!")
 
 # ── Serve React Frontend (same-origin, no CORS issues) ───────────────────────
 _DIST = Path(__file__).parent / "frontend" / "dist"
