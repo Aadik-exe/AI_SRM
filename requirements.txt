@@ -3,6 +3,4 @@ uvicorn[standard]
 python-multipart
 numpy
 opencv-python-headless
-rasterio
 Pillow
-super-image

@@ -19,7 +19,12 @@ from typing import Optional
 
 import cv2
 import numpy as np
-import rasterio
+try:
+    import rasterio
+    _HAS_RASTERIO = True
+except Exception:
+    rasterio = None  # type: ignore
+    _HAS_RASTERIO = False
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
@@ -58,32 +63,38 @@ def load_image_any(path: str) -> tuple[np.ndarray, dict]:
     }
 
     # Try rasterio (handles GeoTIFF natively) ----------------------------------
-    try:
-        with rasterio.open(path) as src:
-            meta.update({
-                "bands":     src.count,
-                "crs":       str(src.crs) if src.crs else None,
-                "transform": str(src.transform),
-                "width":     src.width,
-                "height":    src.height,
-                "dtype":     str(src.dtypes[0]),
-                "source":    "rasterio (GeoTIFF)",
-            })
-            n = min(3, src.count)
-            arrays = []
-            for b in range(1, n + 1):
-                band = src.read(b).astype(np.float32)
-                lo, hi = np.percentile(band, 2), np.percentile(band, 98)
-                band = np.clip((band - lo) / (hi - lo + 1e-8) * 255, 0, 255)
-                arrays.append(band.astype(np.uint8))
-            if n == 1:
-                img_rgb = np.stack([arrays[0]] * 3, axis=2)
-            elif n == 2:
-                img_rgb = np.stack([arrays[0], arrays[1], arrays[0]], axis=2)
-            else:
-                img_rgb = np.stack(arrays[:3], axis=2)
-    except Exception as exc:
-        logger.debug(f"rasterio failed ({exc}), falling back to OpenCV")
+    img_rgb = None
+    if _HAS_RASTERIO:
+        try:
+            with rasterio.open(path) as src:
+                meta.update({
+                    "bands":     src.count,
+                    "crs":       str(src.crs) if src.crs else None,
+                    "transform": str(src.transform),
+                    "width":     src.width,
+                    "height":    src.height,
+                    "dtype":     str(src.dtypes[0]),
+                    "source":    "rasterio (GeoTIFF)",
+                })
+                n = min(3, src.count)
+                arrays = []
+                for b in range(1, n + 1):
+                    band = src.read(b).astype(np.float32)
+                    lo, hi = np.percentile(band, 2), np.percentile(band, 98)
+                    band = np.clip((band - lo) / (hi - lo + 1e-8) * 255, 0, 255)
+                    arrays.append(band.astype(np.uint8))
+                if n == 1:
+                    img_rgb = np.stack([arrays[0]] * 3, axis=2)
+                elif n == 2:
+                    img_rgb = np.stack([arrays[0], arrays[1], arrays[0]], axis=2)
+                else:
+                    img_rgb = np.stack(arrays[:3], axis=2)
+        except Exception as exc:
+            logger.debug(f"rasterio failed ({exc}), falling back to OpenCV")
+            img_rgb = None
+
+    # OpenCV fallback (PNG, JPG, non-GeoTIFF) ----------------------------------
+    if img_rgb is None:
         img_bgr = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         if img_bgr is None:
             raise ValueError(f"Cannot read image: {path}")
@@ -241,153 +252,115 @@ class GeospatialAnalyzer:
         }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SUPER-RESOLUTION ENGINE
-# ══════════════════════════════════════════════════════════════════════════════
 class SuperResolutionEngine:
     """
-    Primary  : A2N  — pretrained model (HuggingFace / super-image library)
-               Attention-based Attention Network, trained on DIV2K ×4
-    Fallback : EDSR-Lite  — LANCZOS4 upscale + detail-enhance + CLAHE
+    Priority 1: EDSR-Satellite — our trained weights (edsr_satellite.pth)
+    Priority 2: EDSR-Lite      — pure OpenCV Lanczos4 + CLAHE (no PyTorch needed)
+    PyTorch is fully optional. If unavailable, OpenCV pipeline runs fine.
     """
 
     def __init__(self):
         self.scale_factor = SCALE_FACTOR
-        self._si_model    = None
+        self._use_torch   = False
+        self._edsr_net    = None
+        self._edsr_dev    = None
         self._load_model()
 
-    # ── Model loading ─────────────────────────────────────────────────────────
     def _load_model(self):
-        # Priority 1: Our satellite-trained EDSR weights
-        sat_path = MODELS_DIR / "edsr_satellite.pth" if MODELS_DIR else None
-        if sat_path and sat_path.exists():
+        sat_path = MODELS_DIR / "edsr_satellite.pth"
+        if sat_path.exists():
             logger.info(f"Loading satellite-trained EDSR from {sat_path}…")
-            self._build_edsr_lite()   # build architecture first
             try:
                 import torch
-                self._edsr_net.load_state_dict(
-                    torch.load(str(sat_path), map_location=self._edsr_dev)
-                )
-                self._edsr_net.eval()
+                import torch.nn as nn
+
+                class ResBlock(nn.Module):
+                    def __init__(self, f=32):
+                        super().__init__()
+                        self.b = nn.Sequential(
+                            nn.Conv2d(f, f, 3, padding=1), nn.ReLU(True),
+                            nn.Conv2d(f, f, 3, padding=1),
+                        )
+                    def forward(self, x): return x + self.b(x) * 0.1
+
+                class EDSR(nn.Module):
+                    def __init__(self, f=32, nb=8, scale=4):
+                        super().__init__()
+                        self.head = nn.Conv2d(3, f, 3, padding=1)
+                        self.body = nn.Sequential(
+                            *[ResBlock(f) for _ in range(nb)],
+                            nn.Conv2d(f, f, 3, padding=1),
+                        )
+                        self.tail = nn.Sequential(
+                            nn.Conv2d(f, f * (scale ** 2), 3, padding=1),
+                            nn.PixelShuffle(scale),
+                            nn.Conv2d(f, 3, 3, padding=1),
+                        )
+                    def forward(self, x):
+                        h = self.head(x)
+                        return self.tail(self.body(h) + h)
+
+                try:
+                    import torch.backends.mps as _mps
+                    dev = torch.device("mps") if _mps.is_available() else \
+                          torch.device("cuda") if torch.cuda.is_available() else \
+                          torch.device("cpu")
+                except Exception:
+                    dev = torch.device("cpu")
+
+                net = EDSR().to(dev)
+                net.load_state_dict(torch.load(str(sat_path), map_location=dev))
+                net.eval()
+                self._edsr_net  = net
+                self._edsr_dev  = dev
+                self._use_torch = True
                 self.model_name = "EDSR-Satellite (SIH 2024 · Sentinel-2 ×4)"
                 self.model_type = "EDSR-SAT"
-                self._si_model  = None
                 logger.info("✓ Satellite-trained EDSR weights loaded")
                 return
             except Exception as exc:
-                logger.warning(f"Failed to load satellite weights ({exc}) — falling back")
+                logger.warning(f"PyTorch EDSR failed ({exc}) — OpenCV fallback")
 
-        # Priority 2: A2N from HuggingFace (pretrained on DIV2K)
-        try:
-            from super_image import A2nModel
-            logger.info("Downloading / loading A2N from HuggingFace…")
-            self._si_model  = A2nModel.from_pretrained("eugenesiow/a2n", scale=4)
-            self._si_model.eval()
-            self.model_name = "A2N (Pretrained · DIV2K ×4)"
-            self.model_type = "A2N"
-            logger.info("✓ A2N model ready")
-        except Exception as exc:
-            logger.warning(f"super-image unavailable ({exc}) — EDSR-Lite fallback active")
-            self.model_name = "EDSR-Lite (Algorithmic ×4)"
-            self.model_type = "EDSR-LITE"
-            self._build_edsr_lite()
+        # OpenCV-only fallback — always works, no memory issues
+        self._use_torch = False
+        self.model_name = "EDSR-Lite (Algorithmic ×4)"
+        self.model_type = "EDSR-LITE"
+        logger.info("SR: OpenCV Lanczos4 + CLAHE mode")
 
-    def _build_edsr_lite(self):
-        """Lightweight EDSR fallback (no pretrained weights needed)."""
-        import torch
-        import torch.nn as nn
-
-        class ResBlock(nn.Module):
-            def __init__(self, f=32):
-                super().__init__()
-                self.b = nn.Sequential(nn.Conv2d(f, f, 3, padding=1), nn.ReLU(True), nn.Conv2d(f, f, 3, padding=1))
-            def forward(self, x): return x + self.b(x) * 0.1
-
-        class EDSR(nn.Module):
-            def __init__(self, f=32, nb=8, scale=4):
-                super().__init__()
-                self.head = nn.Conv2d(3, f, 3, padding=1)
-                self.body = nn.Sequential(*[ResBlock(f) for _ in range(nb)], nn.Conv2d(f, f, 3, padding=1))
-                self.tail = nn.Sequential(nn.Conv2d(f, f * (scale ** 2), 3, padding=1), nn.PixelShuffle(scale), nn.Conv2d(f, 3, 3, padding=1))
-            def forward(self, x):
-                h = self.head(x)
-                return self.tail(self.body(h) + h)
-
-        import torch.backends.mps as _mps
-        if _mps.is_available():
-            dev = torch.device("mps")
-        elif __import__("torch").cuda.is_available():
-            dev = torch.device("cuda")
-        else:
-            dev = torch.device("cpu")
-
-        self._edsr_dev  = dev
-        self._edsr_net  = EDSR().to(dev).eval()
-
-    # ── Inference ─────────────────────────────────────────────────────────────
     def enhance(self, img_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        if self._si_model is not None:
-            return self._a2n_enhance(img_rgb)
-        return self._edsr_enhance(img_rgb)
+        if self._use_torch and self._edsr_net is not None:
+            return self._torch_enhance(img_rgb)
+        return self._cv_enhance(img_rgb)
 
-    def _a2n_enhance(self, img_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        from super_image import ImageLoader
-        from PIL import Image
+    def _torch_enhance(self, img_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         import torch
-
-        pil    = Image.fromarray(img_rgb)
-        inputs = ImageLoader.load_image(pil)
-
+        t = torch.from_numpy(img_rgb.astype(np.float32) / 255.0) \
+                  .permute(2, 0, 1).unsqueeze(0).to(self._edsr_dev)
         with torch.no_grad():
-            preds = self._si_model(inputs)
-
-        sr = (
-            preds.squeeze(0)
-            .permute(1, 2, 0)
-            .cpu()
-            .float()
-            .numpy()
-        )
+            out = self._edsr_net(t)
+        sr = out.squeeze(0).permute(1, 2, 0).cpu().float().numpy()
         sr = np.clip(sr * 255, 0, 255).astype(np.uint8)
-
-        # Gentle CLAHE to restore any over-compressed spectral detail
-        lab            = cv2.cvtColor(sr, cv2.COLOR_RGB2LAB)
-        clahe          = cv2.createCLAHE(clipLimit=1.0, tileGridSize=(8, 8))
-        lab[:, :, 0]   = clahe.apply(lab[:, :, 0])
-        sr             = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
-
+        lab = cv2.cvtColor(sr, cv2.COLOR_RGB2LAB)
+        lab[:, :, 0] = cv2.createCLAHE(1.0, (8, 8)).apply(lab[:, :, 0])
+        sr = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
         return sr, self._confidence_map(img_rgb, sr)
 
-    def _edsr_enhance(self, img_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        import torch
+    def _cv_enhance(self, img_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         h, w = img_rgb.shape[:2]
-        # LANCZOS4 upscale (gold standard for SR baseline)
-        up    = cv2.resize(
-            img_rgb,
-            (w * self.scale_factor, h * self.scale_factor),
-            interpolation=cv2.INTER_LANCZOS4,
-        )
-        # Edge-preserving detail enhance
+        up = cv2.resize(img_rgb, (w * self.scale_factor, h * self.scale_factor),
+                        interpolation=cv2.INTER_LANCZOS4)
         sharp = cv2.detailEnhance(up, sigma_s=10, sigma_r=0.15)
-        # CLAHE on luminance channel
-        lab          = cv2.cvtColor(sharp, cv2.COLOR_RGB2LAB)
-        clahe        = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
-        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
-        sr           = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+        lab = cv2.cvtColor(sharp, cv2.COLOR_RGB2LAB)
+        lab[:, :, 0] = cv2.createCLAHE(1.5, (8, 8)).apply(lab[:, :, 0])
+        sr = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
         return sr, self._confidence_map(img_rgb, sr)
 
     @staticmethod
     def _confidence_map(lr: np.ndarray, sr: np.ndarray) -> np.ndarray:
-        """
-        Per-pixel reconstruction confidence.
-        High confidence (bright) = region closely matches upscaled input.
-        Low confidence (dark)    = AI-hallucinated detail — verify against ground truth.
-        """
-        lr_up      = cv2.resize(lr, (sr.shape[1], sr.shape[0]),
-                                interpolation=cv2.INTER_CUBIC)
-        diff       = cv2.cvtColor(cv2.absdiff(lr_up, sr), cv2.COLOR_RGB2GRAY)
-        local_var  = cv2.GaussianBlur(diff.astype(np.float32), (15, 15), 5)
-        conf       = np.clip(255 - local_var * 3, 0, 255)
+        lr_up     = cv2.resize(lr, (sr.shape[1], sr.shape[0]), interpolation=cv2.INTER_CUBIC)
+        diff      = cv2.cvtColor(cv2.absdiff(lr_up, sr), cv2.COLOR_RGB2GRAY)
+        local_var = cv2.GaussianBlur(diff.astype(np.float32), (15, 15), 5)
+        conf      = np.clip(255 - local_var * 3, 0, 255)
         return conf.astype(np.uint8)
 
 
@@ -395,6 +368,7 @@ class SuperResolutionEngine:
 sr_engine    = SuperResolutionEngine()
 geo_analyzer = GeospatialAnalyzer()
 logger.info(f"SR engine: {sr_engine.model_name}")
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
