@@ -51,7 +51,7 @@ const SCENES = [
 // ─────────────────────────────────────────────────────────────────────────────
 async function pingServer(): Promise<boolean> {
   try {
-    const r = await fetch(`${API}/api/ping`, { signal: AbortSignal.timeout(8000) });
+    const r = await fetch(`${API}/api/ping`, { signal: AbortSignal.timeout(60000) });
     return r.ok;
   } catch { return false; }
 }
