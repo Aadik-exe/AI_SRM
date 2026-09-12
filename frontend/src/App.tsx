@@ -11,7 +11,7 @@ import Globe from '@/components/ui/globe';
 // ─────────────────────────────────────────────────────────────────────────────
 // CONFIG
 // ─────────────────────────────────────────────────────────────────────────────
-const API = 'https://ai-srm.onrender.com';
+const API = '';  // Served from same origin as backend — no CORS needed
 
 const SCENES = [
   {

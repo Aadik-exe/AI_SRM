@@ -22,7 +22,8 @@ import numpy as np
 import rasterio
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -683,6 +684,23 @@ async def upload(file: UploadFile = File(...)):
     finally:
         if up_path.exists():
             up_path.unlink(missing_ok=True)
+
+
+# ── Serve React Frontend (same-origin, no CORS issues) ───────────────────────
+_DIST = Path(__file__).parent / "frontend" / "dist"
+if _DIST.exists():
+    app.mount("/assets", StaticFiles(directory=str(_DIST / "assets")), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str = ""):
+        # Don't intercept /api/* routes
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404)
+        index = _DIST / "index.html"
+        if index.exists():
+            return FileResponse(str(index))
+        raise HTTPException(status_code=404, detail="Frontend not built")
 
 
 if __name__ == "__main__":
